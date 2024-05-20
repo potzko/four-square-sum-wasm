@@ -1,13 +1,14 @@
 #[macro_use]
 extern crate lazy_static;
 
-use wasm_bindgen::prelude::*;
-use std::collections::{HashSet};
-use num_bigint::{BigInt, ToBigInt, RandBigInt};
+use num_bigint::{BigInt, RandBigInt, ToBigInt};
 use num_integer::Integer;
-use num_traits::{Zero, One};
-use num_traits::sign::Signed;
 use num_traits::cast::ToPrimitive;
+use num_traits::sign::Signed;
+use num_traits::{One, Zero};
+use std::cmp::Ordering;
+use std::collections::HashSet;
+use wasm_bindgen::prelude::*;
 
 type Quadruple = [BigInt; 4];
 
@@ -23,13 +24,73 @@ lazy_static! {
     static ref POLLARD_CONST: BigInt = BigInt::from(20);
 }
 
+/*
+    The first digit of A * B will be the same as first_digit(A) * first_digit(B).
+    We can use this by saying that the first digit of all perfect squares must be a part of the powers of the first digit % base.
+    Go over all numbers 0..256, calculate (i * i) % 256, and get the array:
+    [0, 1, 4, 9, 16, 17, 25, 33, 36, 41, 49, 57, 64, 65, 68, 73, 81, 89, 97, 100, 105, 113, 121,
+     129, 132, 137, 144, 145, 153, 161, 164, 169, 177, 185, 193, 196, 201, 209, 217, 225, 228, 233, 241, 249]
+    If the first digit base 256 of a number is not in the array, the number is not a perfect square.
+    We have 44 numbers, so we remove 81% of numbers that way.
+    44 is a large enough number that a binary split once will benefit us over a linear search, but the two halves are of length 21/22, so a linear search should be faster.
+    Chop it in the middle to find two halves separated by 121 (will explain why not 113 later).
+    You get the arrays:
+    [0, 1, 4, 9, 16, 17, 25, 33, 36, 41, 49, 57, 64, 65, 68, 73, 81, 89, 97, 100, 105, 113]
+    [129, 132, 137, 144, 145, 153, 161, 164, 169, 177, 185, 193, 196, 201, 209, 217, 225, 228, 233, 241, 249]
+    Now, we can search the arrays. However, we can do a tiny optimization: we assume we check more primes than non-primes
+    and sort the arrays such that more common first digits of powers are checked earlier.
+    We have 2 equivalent options: cut the array on 113 or 121. We will choose 121 for two reasons:
+    First, we have more total appearances of squares on the lower array, which helps balance it.
+    Second, 121 < 128 -> more numbers are larger than 121 than are smaller than it.
+    So, we prefer the array more commonly accessed to be shorter.
+*/
+const SQUARE_FIRST_DIGIT_MID: u8 = 121;
+const SQUARE_FIRST_DIGIT_A: [u8; 22] = [
+    64, 16, 0, 100, 68, 36, 4, 113, 105, 97, 89, 81, 73, 65, 57, 49, 41, 33, 25, 17, 9, 1,
+];
+const SQUARE_FIRST_DIGIT_B: [u8; 21] = [
+    144, 228, 196, 164, 132, 249, 241, 233, 225, 217, 209, 201, 193, 185, 177, 169, 161, 153, 145,
+    137, 129,
+];
+
+fn get_first_byte(num: &BigInt) -> u8 {
+    // Gets a BigInt, returns the first digit base 256.
+    if num.is_zero() {
+        0
+    } else {
+        (num.iter_u32_digits().next().unwrap() & 255) as u8
+    }
+}
+
 fn is_perfect_square(n: &BigInt) -> bool {
+    // Returns true if n is a perfect square.
+
+    // Before computing the sqrt(n), which is expensive, we start with a heuristic.
+    // If the first digit of the number can't be made by squaring any digit in our base,
+    // then the number cannot be a square.
+    // We choose base 256 as it's a power of 2 (so fast to get the first digit), it is large enough that we remove around 80% of the numbers,
+    // it is also small enough that the arrays are small and fit nicely on the stack (and more importantly in cache).
+    let first_digit = get_first_byte(n);
+    match first_digit.cmp(&SQUARE_FIRST_DIGIT_MID) {
+        Ordering::Equal => {}
+        Ordering::Less => {
+            if !SQUARE_FIRST_DIGIT_A.contains(&get_first_byte(n)) {
+                return false;
+            }
+        }
+        Ordering::Greater => {
+            if !SQUARE_FIRST_DIGIT_B.contains(&get_first_byte(n)) {
+                return false;
+            }
+        }
+    }
+    // If we failed to disqualify the number based on our heuristic, we do a full computation.
     let sqrt = n.sqrt();
     &sqrt * &sqrt == *n
 }
 
 fn do_miller_rabin_test(n: &BigInt, a: &BigInt) -> bool {
-    let init_d = n-&*ONE;
+    let init_d = n - &*ONE;
     let mut d: BigInt = init_d.clone();
     while d.is_even() {
         d = d.div_floor(&*TWO);
@@ -51,18 +112,21 @@ fn do_miller_rabin_test(n: &BigInt, a: &BigInt) -> bool {
 }
 
 const ROBUST_TEST_SET: &'static [(i128, &'static [i128])] = &[
-    (2047, &[ 2 ]),
-    (1373653, &[ 2, 3 ]),
-    (9080191, &[ 31, 73 ]),
-    (25326001, &[ 2, 3, 5 ]),
-    (3215031751, &[ 2, 3, 5, 7 ]),
-    (4759123141, &[ 2, 7, 61 ]),
-    (1122004669633, &[ 2, 13, 23, 1662803 ]),
-    (2152302898747, &[ 2, 3, 5, 7, 11 ]),
-    (3474749660383, &[ 2, 3, 5, 7, 11, 13 ]),
-    (341550071728321, &[ 2, 3, 5, 7, 11, 13, 17 ]),
-    (3825123056546413051, &[ 2, 3, 5, 7, 11, 13, 17, 19, 23 ]),
-    (18446744073709551616, &[ 2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37 ]),
+    (2047, &[2]),
+    (1373653, &[2, 3]),
+    (9080191, &[31, 73]),
+    (25326001, &[2, 3, 5]),
+    (3215031751, &[2, 3, 5, 7]),
+    (4759123141, &[2, 7, 61]),
+    (1122004669633, &[2, 13, 23, 1662803]),
+    (2152302898747, &[2, 3, 5, 7, 11]),
+    (3474749660383, &[2, 3, 5, 7, 11, 13]),
+    (341550071728321, &[2, 3, 5, 7, 11, 13, 17]),
+    (3825123056546413051, &[2, 3, 5, 7, 11, 13, 17, 19, 23]),
+    (
+        18446744073709551616,
+        &[2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37],
+    ),
 ];
 
 fn is_prime(n: &BigInt) -> bool {
@@ -71,10 +135,14 @@ fn is_prime(n: &BigInt) -> bool {
     } else if n <= &ONE || n.is_even() {
         return false;
     }
-    
-    let found = ROBUST_TEST_SET.iter().position(|pair| n < &BigInt::from(pair.0));
+
+    let found = ROBUST_TEST_SET
+        .iter()
+        .position(|pair| n < &BigInt::from(pair.0));
     match found {
-        Some(i) => !(ROBUST_TEST_SET[i].1).into_iter().any(|a| !do_miller_rabin_test(n, &(&*ONE*a))),
+        Some(i) => !(ROBUST_TEST_SET[i].1)
+            .into_iter()
+            .any(|a| !do_miller_rabin_test(n, &(&*ONE * a))),
         None => {
             let mut rng = rand::thread_rng();
             for _i in 0..15 {
@@ -108,16 +176,18 @@ fn factorize_rec(n: &BigInt, result: &mut Vec<BigInt>) {
 
     loop {
         if factor.eq(n) {
-            xs = rng.gen_bigint_range(&*TWO, &(n+(&*ONE)));
+            xs = rng.gen_bigint_range(&*TWO, &(n + (&*ONE)));
             xt = xs.clone();
             c = rng.gen_bigint_range(&*ONE, &*POLLARD_CONST);
         }
         xs = f(&xs, n, &c);
         xt = f(&xt, n, &c);
         xt = f(&xt, n, &c);
-        factor = (&xs-&xt).gcd(n);
-        if factor != *ONE && factor != *n { break; }
-    };
+        factor = (&xs - &xt).gcd(n);
+        if factor != *ONE && factor != *n {
+            break;
+        }
+    }
 
     factorize_rec(&factor, result);
     factorize_rec(&n.div_floor(&factor), result);
@@ -133,10 +203,10 @@ fn factorize(n: &BigInt) -> Vec<BigInt> {
 // Brahmagupta–Fibonacci identity
 fn merge_as_two(a: &Quadruple, b: &Quadruple) -> Quadruple {
     [
-        (&a[0]*&b[0] - &a[1]*&b[1]),
-        (&a[0]*&b[1] + &a[1]*&b[0]),
+        (&a[0] * &b[0] - &a[1] * &b[1]),
+        (&a[0] * &b[1] + &a[1] * &b[0]),
         (*ZERO).clone(),
-        (*ZERO).clone()
+        (*ZERO).clone(),
     ]
 }
 
@@ -161,22 +231,22 @@ fn find_sum_of_two(p: &BigInt) -> Quadruple {
             (*ONE).clone(),
             (*ZERO).clone(),
             (*ZERO).clone(),
-            (*ZERO).clone()
+            (*ZERO).clone(),
         ];
     } else if p == &*TWO {
         return [
             (*ONE).clone(),
             (*ONE).clone(),
             (*ZERO).clone(),
-            (*ZERO).clone()
+            (*ZERO).clone(),
         ];
     }
 
     let mut rems;
     let mut rng = rand::thread_rng();
-    let p_dec = p-(&*ONE);
-    let p_dec_half = &p_dec/(&*TWO);
-    let p_dec_quarter = &p_dec_half/(&*TWO);
+    let p_dec = p - (&*ONE);
+    let p_dec_half = &p_dec / (&*TWO);
+    let p_dec_quarter = &p_dec_half / (&*TWO);
 
     loop {
         let mut q = rng.gen_bigint_range(&*ZERO, &p);
@@ -191,7 +261,7 @@ fn find_sum_of_two(p: &BigInt) -> Quadruple {
                 rems[0].clone(),
                 rems[1].clone(),
                 (*ZERO).clone(),
-                (*ZERO).clone()
+                (*ZERO).clone(),
             ];
         }
     }
@@ -202,80 +272,93 @@ fn find_sum_of_three(n: &BigInt) -> Quadruple {
     if let Some(exp) = check_rabin_exceptions(n) {
         return exp;
     } else if n.is_multiple_of(&*FOUR) {
-        let sub = find_sum_of_three(&(n/(&*FOUR)));
-        return [ &sub[0]*(&*TWO), &sub[1]*(&*TWO), &sub[2]*(&*TWO), &sub[3]*(&*TWO) ];
+        let sub = find_sum_of_three(&(n / (&*FOUR)));
+        return [
+            &sub[0] * (&*TWO),
+            &sub[1] * (&*TWO),
+            &sub[2] * (&*TWO),
+            &sub[3] * (&*TWO),
+        ];
     } else if is_perfect_square(n) {
-        return [ n.sqrt(), (*ZERO).clone(), (*ZERO).clone(), (*ZERO).clone() ];
+        return [n.sqrt(), (*ZERO).clone(), (*ZERO).clone(), (*ZERO).clone()];
     }
 
     match n.div_rem(&*EIGHT).1.to_i64().unwrap() {
         7 => {
             panic!("find_sum_of_three failed!")
-        },
+        }
         3 => {
             let mut rng = rand::thread_rng();
             let mut x;
             let mut p;
             loop {
-                x = rng.gen_bigint_range(&*ZERO, &(n.sqrt()+(&*ONE)));
-                p = (n - &x*&x) / (&*TWO);
+                x = rng.gen_bigint_range(&*ZERO, &(n.sqrt() + (&*ONE)));
+                p = (n - &x * &x) / (&*TWO);
 
-                if (n-&x*&x).is_multiple_of(&*TWO) && (is_prime(&p) || p.is_one()) { break; }
+                if (n - &x * &x).is_multiple_of(&*TWO) && (is_prime(&p) || p.is_one()) {
+                    break;
+                }
             }
             let two = find_sum_of_two(&p);
-            [ x, &two[0]+&two[1], (&two[0]-&two[1]).abs(), (*ZERO).clone() ]
-        },
+            [
+                x,
+                &two[0] + &two[1],
+                (&two[0] - &two[1]).abs(),
+                (*ZERO).clone(),
+            ]
+        }
         _ => {
             let mut rng = rand::thread_rng();
             let mut x;
             let mut p;
             loop {
-                x = rng.gen_bigint_range(&*ZERO, &(n.sqrt()+(&*ONE)));
-                p = n - &x*&x;
-                if is_prime(&p) { break; }
+                x = rng.gen_bigint_range(&*ZERO, &(n.sqrt() + (&*ONE)));
+                p = n - &x * &x;
+                if is_prime(&p) {
+                    break;
+                }
             }
             let two = find_sum_of_two(&p);
-            [ x, two[0].clone(), two[1].clone(), (*ZERO).clone() ]
+            [x, two[0].clone(), two[1].clone(), (*ZERO).clone()]
         }
     }
 }
-
 
 fn check_rabin_exceptions(n: &BigInt) -> Option<Quadruple> {
     if n > &9634_i32.to_bigint().unwrap() {
         None
     } else {
         let result = match n.to_i64().unwrap() {
-            5 => [ 2, 1, 0, 0 ],
-            10 => [ 3, 1, 0, 0 ],
-            13 => [ 3, 2, 0, 0 ],
-            34 => [ 5, 3, 0, 0 ],
-            37 => [ 6, 1, 0, 0 ],
-            58 => [ 7, 3, 0, 0 ],
-            61 => [ 6, 5, 0, 0 ],
-            85 => [ 9, 2, 0, 0 ],
-            130 => [ 11, 3, 0, 0 ],
-            214 => [ 14, 3, 3, 0 ],
-            226 => [ 15, 1, 0, 0 ],
-            370 => [ 19, 3, 0, 0 ],
-            526 => [ 21, 9, 2, 0 ],
-            706 => [ 25, 9, 0, 0 ],
-            730 => [ 27, 1, 0, 0 ],
-            829 => [ 27, 10, 0, 0 ],
-            1414 => [ 33, 18, 1, 0 ],
-            1549 => [ 35, 18, 0, 0 ],
-            1906 => [ 41, 15, 0, 0 ],
-            2986 => [ 45, 31, 0, 0 ],
-            7549 => [ 85, 18, 0, 0 ],
-            9634 => [ 97, 15, 0, 0 ],
-            _ => [ -1, -1, -1, -1 ],
+            5 => [2, 1, 0, 0],
+            10 => [3, 1, 0, 0],
+            13 => [3, 2, 0, 0],
+            34 => [5, 3, 0, 0],
+            37 => [6, 1, 0, 0],
+            58 => [7, 3, 0, 0],
+            61 => [6, 5, 0, 0],
+            85 => [9, 2, 0, 0],
+            130 => [11, 3, 0, 0],
+            214 => [14, 3, 3, 0],
+            226 => [15, 1, 0, 0],
+            370 => [19, 3, 0, 0],
+            526 => [21, 9, 2, 0],
+            706 => [25, 9, 0, 0],
+            730 => [27, 1, 0, 0],
+            829 => [27, 10, 0, 0],
+            1414 => [33, 18, 1, 0],
+            1549 => [35, 18, 0, 0],
+            1906 => [41, 15, 0, 0],
+            2986 => [45, 31, 0, 0],
+            7549 => [85, 18, 0, 0],
+            9634 => [97, 15, 0, 0],
+            _ => [-1, -1, -1, -1],
         };
         if result[0] > 0 {
             Some([
                 BigInt::from(result[0]),
                 BigInt::from(result[1]),
                 BigInt::from(result[2]),
-                BigInt::from(result[3])
+                BigInt::from(result[3]),
             ])
         } else {
             None
@@ -289,21 +372,21 @@ fn find_solution(n: &BigInt, find_optimal: bool) -> Quadruple {
             (*ONE).clone(),
             (*ZERO).clone(),
             (*ZERO).clone(),
-            (*ZERO).clone()
+            (*ZERO).clone(),
         ];
     } else if n == &*TWO {
         return [
             (*ONE).clone(),
             (*ONE).clone(),
             (*ZERO).clone(),
-            (*ZERO).clone()
+            (*ZERO).clone(),
         ];
     } else if n == &*THREE {
         return [
             (*ONE).clone(),
             (*ONE).clone(),
             (*ONE).clone(),
-            (*ZERO).clone()
+            (*ZERO).clone(),
         ];
     }
 
@@ -311,20 +394,30 @@ fn find_solution(n: &BigInt, find_optimal: bool) -> Quadruple {
     // 아래에서 n = 4^a mod 8 = 7 인지 체크하여 4개의 수가 필요한지를 체크하기 때문.
     if n.is_multiple_of(&*FOUR) {
         let sub = find_solution(&n.div_floor(&*FOUR), find_optimal);
-        return [ &sub[0]*(&*TWO), &sub[1]*(&*TWO), &sub[2]*(&*TWO), &sub[3]*(&*TWO) ];
+        return [
+            &sub[0] * (&*TWO),
+            &sub[1] * (&*TWO),
+            &sub[2] * (&*TWO),
+            &sub[3] * (&*TWO),
+        ];
     }
 
     // 완전 제곱수라면 1개로 표현. (필요충분)
     if is_perfect_square(n) {
-        return [ n.sqrt(), (*ZERO).clone(), (*ZERO).clone(), (*ZERO).clone() ];
+        return [n.sqrt(), (*ZERO).clone(), (*ZERO).clone(), (*ZERO).clone()];
     }
 
     // n mod 8 = 7 이라면 무조건 4개의 수가 필요. (필요충분)
     // n = 4 + (n-4)로 분할하면 (n-4) mod 8 = 3 이므로 3개 내로 표현 가능할 테고,
     // 그럼 { 2, solution of (n-4) }가 해가 될 것.
     if n.div_rem(&*EIGHT).1.to_i64().unwrap() == 7 {
-        let sub = find_sum_of_three(&(n-(&*FOUR)));
-        return [ (*TWO).clone(), sub[0].clone(), sub[1].clone(), sub[2].clone() ];
+        let sub = find_sum_of_three(&(n - (&*FOUR)));
+        return [
+            (*TWO).clone(),
+            sub[0].clone(),
+            sub[1].clone(),
+            sub[2].clone(),
+        ];
     }
 
     // 위의 조건들에 모두 해당하지 않는다면, n은 2개 또는 3개의 제곱수로 나타낼 수 있음.
@@ -348,7 +441,10 @@ fn find_solution(n: &BigInt, find_optimal: bool) -> Quadruple {
         // oddCount에 포함된 p에는 2 or 4k+1 꼴 or 4k+3 꼴의 소수가 있을 수 있는데
         // 2와 4k+1은 2개의 제곱수로 나타낼 수 있으나,
         // 4k+3는 3개의 제곱수 필요.
-        if f_with_odd_exp.iter().any(|p| p.div_rem(&*FOUR).1.to_i64().unwrap() == 3) {
+        if f_with_odd_exp
+            .iter()
+            .any(|p| p.div_rem(&*FOUR).1.to_i64().unwrap() == 3)
+        {
             return find_sum_of_three(n);
         }
 
@@ -358,10 +454,10 @@ fn find_solution(n: &BigInt, find_optimal: bool) -> Quadruple {
             result = merge_as_two(&result, &find_sum_of_two(&f_with_odd_exp[i]));
         }
         return [
-            &result[0]*&even_acc,
-            &result[1]*&even_acc,
-            &result[2]*&even_acc,
-            &result[3]*&even_acc
+            &result[0] * &even_acc,
+            &result[1] * &even_acc,
+            &result[2] * &even_acc,
+            &result[3] * &even_acc,
         ];
     } else {
         return find_sum_of_three(n);
@@ -376,8 +472,9 @@ pub fn find_solution_str(n: String, find_optimal: bool) -> String {
         result[0].to_str_radix(10_u32),
         result[1].to_str_radix(10_u32),
         result[2].to_str_radix(10_u32),
-        result[3].to_str_radix(10_u32)
-    ].join(" ");
+        result[3].to_str_radix(10_u32),
+    ]
+    .join(" ");
 }
 
 #[cfg(target_arch = "wasm32")]
