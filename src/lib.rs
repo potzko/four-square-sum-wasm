@@ -55,11 +55,7 @@ const SQUARE_FIRST_DIGIT_B: [u8; 21] = [
 
 fn get_first_byte(num: &BigInt) -> u8 {
     // Gets a BigInt, returns the first digit base 256.
-    if num.is_zero() {
-        0
-    } else {
-        (num.iter_u32_digits().next().unwrap() & 255) as u8
-    }
+    (num.iter_u32_digits().next().unwrap_or(0) & 255) as u8
 }
 
 fn is_perfect_square(n: &BigInt) -> bool {
